@@ -1,0 +1,1290 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>スケジュール＆チェックリスト連携アプリ</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'schedule-sync-app';
+
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+    const firebaseConfig = {
+  apiKey: "AIzaSyC3ItczFJKx8C-qNO8t0D4ycZNNDvGifmc",
+  authDomain: "checklist-schedule.firebaseapp.com",
+  projectId: "checklist-schedule",
+  storageBucket: "checklist-schedule.firebasestorage.app",
+  messagingSenderId: "27095356750",
+  appId: "1:27095356750:web:647eff472b237d19903a1f",
+  measurementId: "G-5C4K59L9E1"
+};
+
+    let db = null;
+    let auth = null;
+    let currentUser = null;
+    let initPromise = null;
+
+    window.initFirebaseSync = async () => {
+      if (initPromise) return initPromise;
+      initPromise = (async () => {
+        if (!firebaseConfig || !firebaseConfig.apiKey) {
+          console.warn("Firebase config is missing or invalid.");
+          return null;
+        }
+        try {
+          const app = initializeApp(firebaseConfig);
+          auth = getAuth(app);
+          db = getFirestore(app);
+
+          if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+            const cred = await signInWithCustomToken(auth, __initial_auth_token);
+            currentUser = cred.user;
+          } else {
+            const cred = await signInAnonymously(auth);
+            currentUser = cred.user;
+          }
+          window.currentFirebaseUid = currentUser.uid;
+          return { db, auth, currentUser, appId };
+        } catch (e) {
+          console.error("Firebase Auth Error:", e);
+          return null;
+        }
+      })();
+      return initPromise;
+    };
+
+    // 起動時に自動で初期化試行
+    window.initFirebaseSync();
+
+    window.AnonymousSyncEngine = {
+      isConfigured() {
+        return !!(firebaseConfig && firebaseConfig.apiKey);
+      },
+
+      async sendSlotData(slotCode, payload) {
+        const conn = await window.initFirebaseSync();
+        if (!conn || !db || !currentUser) {
+          throw new Error("Firebaseが未設定または認証に失敗しました。");
+        }
+        
+        const slotDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'sync_slots', slotCode);
+        await setDoc(slotDocRef, {
+          updatedAt: new Date().toISOString(),
+          senderUid: currentUser.uid,
+          payload: payload
+        });
+      },
+
+      listenSlotData(slotCode, onDataReceived, onError) {
+        let unsubscribe = null;
+        let isCancelled = false;
+
+        window.initFirebaseSync().then((conn) => {
+          if (isCancelled) return;
+          if (!conn || !db) {
+            if (onError) onError(new Error("Firebase未設定"));
+            return;
+          }
+
+          const slotDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'sync_slots', slotCode);
+          unsubscribe = onSnapshot(slotDocRef, (snapshot) => {
+            if (snapshot.exists()) {
+              const data = snapshot.data();
+              onDataReceived(data);
+            }
+          }, (err) => {
+            console.error("Sync listen error:", err);
+            if (onError) onError(err);
+          });
+        }).catch(err => {
+          if (onError) onError(err);
+        });
+
+        return () => {
+          isCancelled = true;
+          if (unsubscribe) unsubscribe();
+        };
+      }
+    };
+  </script>
+
+  <style>
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: #f3f4f6;
+      margin: 0; padding: 0; overflow: hidden;
+      user-select: none;
+    }
+    .completed-task {
+      opacity: 0.45;
+      text-decoration: line-through;
+      background-color: #f1f5f9 !important;
+      border-color: #cbd5e1 !important;
+      transition: all 0.2s ease;
+    }
+    .active-task {
+      transition: all 0.2s ease;
+    }
+    .active-task:active { transform: scale(0.99); }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+    .time-slot-row {
+      height: 24px;
+      box-sizing: border-box;
+    }
+    .time-slot-hour-start {
+      border-top: 2px solid #1e293b !important;
+    }
+    @keyframes pulse-light {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .animate-pulse-fast {
+      animation: pulse-light 0.8s infinite;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const defaultTemplates = {
+      restriction: [
+        { id: 'r1', day: '前準備', timeStart: '-', timeEnd: '', task: '表紙、サブジェクトNo.、セッションNo.記入欄の確認', checked: false },
+        { id: 'r2', day: '1日目', timeStart: '17:00', timeEnd: '18:00', task: '身長・体重測定', checked: false },
+        { id: 'r3', day: '1日目', timeStart: '19:00', timeEnd: '20:40', task: '手続き記憶 or 陳述記憶 課題', checked: false },
+        { id: 'r4', day: '1日目', timeStart: '21:00', timeEnd: '21:30', task: 'PSG装着', checked: false },
+        { id: 'r5', day: '1日目', timeStart: '22:00', timeEnd: '', task: '消灯 (室温22.00℃)', checked: false },
+        { id: 'r6', day: '2日目', timeStart: '08:00', timeEnd: '08:30', task: 'PVT① セッションNo.: [セッション:4:1]', checked: false },
+        { id: 'r7', day: '2日目', timeStart: '11:00', timeEnd: '11:30', task: 'PVT② セッションNo.: [セッション:4:2]', checked: false },
+      ]
+    };
+
+    const DEFAULT_DAYS = ['前準備', '1日目', '2日目', '3日目', '4日目', '最終日'];
+
+    const TIME_OPTIONS = ['-'];
+    for (let h = 0; h < 24; h++) {
+      for (let m = 0; m < 60; m += 5) {
+        const hh = h.toString().padStart(2, '0');
+        const mm = m.toString().padStart(2, '0');
+        TIME_OPTIONS.push(`${hh}:${mm}`);
+      }
+    }
+
+    const COLORS = ['blue', 'indigo', 'purple', 'emerald', 'amber', 'rose', 'teal'];
+    const generateId = () => Math.random().toString(36).substring(2, 9);
+
+    const processPlaceholders = (text, subject) => {
+      if (!text || !subject) return text || "";
+      let processed = text;
+      
+      const subjectId = subject.subjectId || "";
+      const subjectNo = subject.subjectNo || "";
+      
+      const idMatch = subjectId.match(/\d+/);
+      const idNum = idMatch ? parseInt(idMatch[0], 10).toString() : "0";
+      
+      processed = processed.replace(/{{SUBJECT_ID}}/g, subjectId);
+      processed = processed.replace(/{{被験者ID}}/g, subjectId);
+      processed = processed.replace(/\[サブジェクト\]/g, subjectNo);
+      processed = processed.replace(/{{SESSION:(\d+):(\d+)}}/g, (match, day, count) => `${idNum}${day}${count}`);
+      processed = processed.replace(/\[セッション:(\d+):(\d+)\]/g, (match, day, count) => `${idNum}${day}${count}`);
+      
+      return processed;
+    };
+
+    const timeToMinutes = (t) => {
+      if (!t || t === '-') return -1;
+      const match = t.match(/(\d{1,2}):(\d{2})/);
+      if (match) return parseInt(match[1], 10) * 60 + parseInt(match[2], 10);
+      return -1;
+    };
+
+    const exportToExcel = (tasks, subjects) => {
+      const data = tasks.map(t => {
+        const subj = subjects.find(s => s.id === t.subjectId) || {};
+        const timeDisplay = t.timeEnd ? `${t.timeStart}-${t.timeEnd}` : t.timeStart;
+        return {
+          "被験者氏名": subj.name || "",
+          "被験者ID": subj.subjectId || "",
+          "サブジェクトNo": subj.subjectNo || "",
+          "日/フェーズ": t.day,
+          "時間": timeDisplay,
+          "タスク内容": processPlaceholders(t.task, subj),
+          "ステータス": t.checked ? "完了" : "未完了"
+        };
+      });
+      
+      const worksheet = XLSX.utils.json_to_sheet(data);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Checklist");
+      
+      const d = new Date();
+      const dateStr = `${d.getFullYear()}${(d.getMonth()+1).toString().padStart(2,'0')}${d.getDate().toString().padStart(2,'0')}`;
+      XLSX.writeFile(workbook, `実験スケジュール_${dateStr}.xlsx`);
+    };
+
+    const Modal = ({ isOpen, title, message, onConfirm, onCancel, children }) => {
+      if (!isOpen) return null;
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-xl p-6 max-w-md w-full shadow-2xl">
+            <h3 className="text-xl font-bold mb-3 text-gray-800">{title}</h3>
+            {message && <p className="text-gray-600 mb-5 text-sm">{message}</p>}
+            {children && <div className="mb-5">{children}</div>}
+            <div className="flex justify-end space-x-3">
+              <button onClick={onCancel} className="px-4 py-2 rounded-lg text-gray-600 bg-gray-100 hover:bg-gray-200 text-sm font-medium">キャンセル</button>
+              {onConfirm && <button onClick={onConfirm} className="px-4 py-2 rounded-lg text-white bg-blue-600 hover:bg-blue-700 text-sm font-medium">OK</button>}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const TaskItem = ({ task, subject, viewType, onToggle, showSubjectLabel }) => {
+      const timeDisplay = task.timeEnd && task.timeEnd !== '-' ? `${task.timeStart} - ${task.timeEnd}` : task.timeStart;
+      const parsedTask = processPlaceholders(task.task, subject);
+      const color = subject?.color || 'blue';
+
+      return (
+        <div 
+          onClick={() => onToggle(task.id)}
+          className={`flex items-center p-3.5 mb-2 rounded-xl border-2 cursor-pointer transition-all duration-150 ${
+            task.checked 
+              ? 'completed-task border-gray-200' 
+              : `active-task bg-white border-gray-200 hover:border-${color}-400 hover:shadow`
+          }`}
+        >
+          <div className="flex-shrink-0 mr-3">
+            <div className={`w-6 h-6 rounded-md flex items-center justify-center border-2 transition-colors ${
+              task.checked ? `bg-${color}-500 border-${color}-500 text-white` : 'border-gray-300 bg-white'
+            }`}>
+              {task.checked && <i className="fa-solid fa-check text-xs"></i>}
+            </div>
+          </div>
+
+          <div className="w-28 flex-shrink-0 mr-3">
+            <span className={`text-xs font-mono font-bold px-2 py-1 rounded border inline-block ${
+              task.checked ? 'bg-gray-100 text-gray-400 border-gray-200' : 'bg-gray-50 text-gray-700 border-gray-200'
+            }`}>
+              {timeDisplay || '-'}
+            </span>
+          </div>
+
+          <div className="flex-1 min-w-0 pr-2">
+            <div className="flex items-center space-x-2">
+              {showSubjectLabel && subject && (
+                <span className={`text-xs px-2 py-0.5 rounded font-bold bg-${color}-100 text-${color}-800`}>
+                  {subject.name || subject.subjectId}
+                </span>
+              )}
+              <span className={`text-sm font-semibold truncate ${task.checked ? 'text-gray-400' : 'text-gray-800'}`}>
+                {parsedTask}
+              </span>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const App = () => {
+      const [subjects, setSubjects] = React.useState(() => {
+        const saved = localStorage.getItem('app_v3_subjects');
+        return saved ? JSON.parse(saved) : [
+          { id: 'subj_1', name: '被験者A', subjectId: 'FANS010', subjectNo: '10', color: 'blue' },
+          { id: 'subj_2', name: '被験者B', subjectId: 'FANS011', subjectNo: '11', color: 'indigo' }
+        ];
+      });
+
+      const [tasks, setTasks] = React.useState(() => {
+        const saved = localStorage.getItem('app_v3_tasks');
+        return saved ? JSON.parse(saved) : defaultTemplates.restriction.map(t => ({ ...t, subjectId: 'subj_1' }));
+      });
+
+      const [availableDays, setAvailableDays] = React.useState(() => {
+        const saved = localStorage.getItem('app_v3_days');
+        return saved ? JSON.parse(saved) : DEFAULT_DAYS;
+      });
+
+      const [selectedSubjectId, setSelectedSubjectId] = React.useState(subjects[0]?.id || 'subj_1');
+      const [selectedDay, setSelectedDay] = React.useState('1日目');
+      const [viewType, setViewType] = React.useState('schedule');
+      const [displayMode, setDisplayMode] = React.useState('individual');
+      const [isEditMode, setIsEditMode] = React.useState(false);
+      const [modalConfig, setModalConfig] = React.useState({ isOpen: false });
+      
+      const fileInputRef = React.useRef(null);
+
+      // 匿名同期管理用
+      const [syncSlotCode, setSyncSlotCode] = React.useState('');
+      const [activeSlotCode, setActiveSlotCode] = React.useState(() => localStorage.getItem('app_v3_sync_slot') || '');
+      const [isSyncActive, setIsSyncActive] = React.useState(() => localStorage.getItem('app_v3_sync_active') === 'true' && !!localStorage.getItem('app_v3_sync_slot'));
+      const [syncStatus, setSyncStatus] = React.useState('idle');
+      const [syncErrorMessage, setSyncErrorMessage] = React.useState('');
+      const [isMaskingEnabled, setIsMaskingEnabled] = React.useState(true);
+      const [toastMessage, setToastMessage] = React.useState(null);
+
+      const isRemoteLockRef = React.useRef(false);
+      const remoteLockTimerRef = React.useRef(null);
+
+      React.useEffect(() => { localStorage.setItem('app_v3_subjects', JSON.stringify(subjects)); }, [subjects]);
+      React.useEffect(() => { localStorage.setItem('app_v3_tasks', JSON.stringify(tasks)); }, [tasks]);
+      React.useEffect(() => { localStorage.setItem('app_v3_days', JSON.stringify(availableDays)); }, [availableDays]);
+
+      React.useEffect(() => {
+        if (activeSlotCode) {
+          localStorage.setItem('app_v3_sync_slot', activeSlotCode);
+        } else {
+          localStorage.removeItem('app_v3_sync_slot');
+        }
+        localStorage.setItem('app_v3_sync_active', isSyncActive ? 'true' : 'false');
+      }, [activeSlotCode, isSyncActive]);
+
+      React.useEffect(() => {
+        if (!subjects.find(s => s.id === selectedSubjectId) && subjects.length > 0) {
+          setSelectedSubjectId(subjects[0].id);
+        }
+      }, [subjects, selectedSubjectId]);
+
+      React.useEffect(() => {
+        if (!availableDays.includes(selectedDay) && availableDays.length > 0) {
+          setSelectedDay(availableDays[0]);
+        }
+      }, [availableDays]);
+
+      const showToast = (msg) => {
+        setToastMessage(msg);
+        setTimeout(() => setToastMessage(null), 3000);
+      };
+
+      const prepareAnonymizedPayload = () => {
+        const anonymizedSubjects = subjects.map((s, idx) => ({
+          id: s.id,
+          name: isMaskingEnabled ? `被験者${idx + 1}` : s.name,
+          subjectId: isMaskingEnabled ? `SUBJ-${(idx + 1).toString().padStart(2, '0')}` : s.subjectId,
+          subjectNo: s.subjectNo,
+          color: s.color
+        }));
+
+        return {
+          tasks: tasks,
+          subjects: anonymizedSubjects,
+          days: availableDays,
+          timestamp: Date.now()
+        };
+      };
+
+      React.useEffect(() => {
+        if (!isSyncActive || !activeSlotCode) return;
+        if (isRemoteLockRef.current) return;
+
+        if (!window.AnonymousSyncEngine?.isConfigured()) {
+          setSyncStatus('unconfigured');
+          setSyncErrorMessage('Firebaseの設定情報がindex.htmlに組み込まれていません。');
+          return;
+        }
+
+        const timer = setTimeout(async () => {
+          try {
+            setSyncStatus('connecting');
+            const payload = prepareAnonymizedPayload();
+            if (window.AnonymousSyncEngine) {
+              await window.AnonymousSyncEngine.sendSlotData(activeSlotCode, payload);
+              setSyncStatus('synced');
+              setSyncErrorMessage('');
+            }
+          } catch (e) {
+            console.error("Slot upload error:", e);
+            setSyncStatus('error');
+            setSyncErrorMessage(e.message || 'データ送信に失敗しました');
+          }
+        }, 500);
+
+        return () => clearTimeout(timer);
+      }, [tasks, subjects, availableDays, isSyncActive, activeSlotCode, isMaskingEnabled]);
+
+      React.useEffect(() => {
+        if (!isSyncActive || !activeSlotCode) return;
+
+        if (!window.AnonymousSyncEngine?.isConfigured()) {
+          setSyncStatus('unconfigured');
+          setSyncErrorMessage('Firebaseの設定情報がindex.htmlに組み込まれていません。');
+          return;
+        }
+
+        setSyncStatus('connecting');
+        const unsubscribe = window.AnonymousSyncEngine?.listenSlotData(
+          activeSlotCode,
+          (remoteData) => {
+            if (!remoteData || !remoteData.payload) return;
+
+            if (remoteData.senderUid && window.currentFirebaseUid && remoteData.senderUid === window.currentFirebaseUid) {
+              setSyncStatus('synced');
+              return;
+            }
+
+            const { tasks: rTasks, subjects: rSubjects, days: rDays } = remoteData.payload;
+
+            isRemoteLockRef.current = true;
+            if (remoteLockTimerRef.current) clearTimeout(remoteLockTimerRef.current);
+            remoteLockTimerRef.current = setTimeout(() => {
+              isRemoteLockRef.current = false;
+            }, 1500);
+
+            if (rTasks) setTasks(rTasks);
+            if (rDays) setAvailableDays(rDays);
+
+            if (rSubjects) {
+              setSubjects(prev => {
+                return prev.map(s => {
+                  const match = rSubjects.find(rs => rs.id === s.id);
+                  return match ? { ...s, color: match.color || s.color } : s;
+                });
+              });
+            }
+
+            setSyncStatus('synced');
+            setSyncErrorMessage('');
+            showToast('🔄 相手の変更を受信・反映しました');
+          },
+          (err) => {
+            setSyncStatus('error');
+            setSyncErrorMessage('データベース接続エラー：設定を確認してください。');
+          }
+        );
+
+        return () => {
+          if (typeof unsubscribe === 'function') unsubscribe();
+        };
+      }, [isSyncActive, activeSlotCode]);
+
+      // --- テンプレートの保存 (エクスポート) ---
+      const handleExportTemplateClick = () => {
+        setModalConfig({
+          isOpen: true,
+          title: 'テンプレートの保存 (JSON)',
+          message: '現在の被験者設定、タスクスケジュール、フェーズ設定をファイルとして保存します。',
+          content: (
+            <div>
+              <label className="text-xs font-bold text-gray-500 mb-2 block">保存するファイル名:</label>
+              <input 
+                type="text"
+                id="export-filename"
+                className="w-full border-2 border-gray-300 rounded-lg p-2.5 text-sm font-bold focus:border-blue-500 outline-none"
+                defaultValue={`schedule_template_${new Date().toISOString().slice(0, 10)}`}
+              />
+            </div>
+          ),
+          onConfirm: () => {
+            const input = document.getElementById('export-filename');
+            let filename = input ? input.value.trim() : 'template';
+            if (!filename) filename = 'template';
+            if (!filename.endsWith('.json')) filename += '.json';
+
+            const dataStr = JSON.stringify({ subjects, tasks, availableDays }, null, 2);
+            const blob = new Blob([dataStr], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            setModalConfig({ isOpen: false });
+            showToast('✅ テンプレートを保存しました');
+          },
+          onCancel: () => setModalConfig({ isOpen: false })
+        });
+      };
+
+      // --- テンプレートの読み込み (インポート) ---
+      const handleImportTemplateClick = () => {
+        if (fileInputRef.current) {
+          fileInputRef.current.click();
+        }
+      };
+
+      const handleFileChange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          try {
+            const data = JSON.parse(event.target.result);
+            // 簡易バリデーション
+            if (data && data.tasks && Array.isArray(data.tasks)) {
+              if (data.subjects) setSubjects(data.subjects);
+              if (data.tasks) setTasks(data.tasks);
+              if (data.availableDays) setAvailableDays(data.availableDays);
+              showToast('✅ テンプレートを読み込みました');
+            } else {
+              alert("無効なテンプレートファイルです。");
+            }
+          } catch (error) {
+            alert("ファイルの読み込みに失敗しました。JSON形式を確認してください。");
+            console.error(error);
+          }
+        };
+        reader.readAsText(file);
+        e.target.value = ''; // Reset input
+      };
+
+      const generateSlotCode = () => Math.floor(100000 + Math.random() * 900000).toString();
+
+      const openSyncModal = () => {
+        const defaultCode = activeSlotCode || generateSlotCode();
+        setSyncSlotCode(defaultCode);
+        const isConfigured = window.AnonymousSyncEngine?.isConfigured();
+
+        setModalConfig({
+          isOpen: true,
+          title: '匿名スロット同期の設定',
+          content: (
+            <div className="space-y-4 text-sm text-gray-600">
+              {!isConfigured && (
+                <div className="bg-red-50 border border-red-200 p-3 rounded-xl text-red-800 text-xs leading-relaxed">
+                  <i className="fa-solid fa-triangle-exclamation mr-1.5 text-red-600 font-bold"></i>
+                  <b>Firebase接続未設定:</b> <code>index.html</code> 内の <code>firebaseConfig</code> が設定されていません。同梱の <code>setup_guide.md</code> を参照してFirebase設定を書き換えてください。
+                </div>
+              )}
+
+              <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-xl text-emerald-800 text-xs leading-relaxed">
+                <i className="fa-solid fa-user-shield mr-1.5 text-emerald-600"></i>
+                <b>個人情報保護モード:</b> 氏名や実際の被験者IDはサーバーに送信されず、仮名化された進捗・時間データのみ同期されます。
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-500 mb-1">6桁の同期スロットコード</label>
+                <div className="flex space-x-2">
+                  <input 
+                    type="text"
+                    maxLength={6}
+                    id="sync-code-input"
+                    defaultValue={defaultCode}
+                    className="flex-1 border-2 border-gray-300 rounded-lg px-3 py-2 text-center text-lg font-mono font-bold tracking-widest focus:border-blue-500 outline-none"
+                    placeholder="123456"
+                  />
+                  <button 
+                    type="button"
+                    onClick={() => {
+                      const code = generateSlotCode();
+                      const input = document.getElementById('sync-code-input');
+                      if (input) input.value = code;
+                    }}
+                    className="px-3 py-2 bg-gray-100 hover:bg-gray-200 font-bold rounded-lg text-xs text-gray-700 transition"
+                  >
+                    再発行
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between p-2.5 bg-gray-50 rounded-xl border border-gray-200">
+                <div>
+                  <div className="font-bold text-xs text-gray-800">個人情報の送信をスキップ</div>
+                  <div className="text-[11px] text-gray-400">氏名・被験者IDを仮名化して同期</div>
+                </div>
+                <input 
+                  type="checkbox"
+                  defaultChecked={isMaskingEnabled}
+                  id="masking-toggle"
+                  className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
+                />
+              </div>
+
+              {isSyncActive && (
+                <div className="text-center pt-1">
+                  <span className="text-xs text-emerald-600 font-bold flex items-center justify-center">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping mr-1.5"></span>
+                    現在スロット #{activeSlotCode} とリアルタイム同期中
+                  </span>
+                </div>
+              )}
+            </div>
+          ),
+          onConfirm: () => {
+            const codeInput = document.getElementById('sync-code-input')?.value?.trim();
+            const maskCheck = document.getElementById('masking-toggle')?.checked;
+
+            if (!codeInput || codeInput.length < 4) {
+              alert("有効なコードを入力してください");
+              return;
+            }
+
+            setIsMaskingEnabled(!!maskCheck);
+            setActiveSlotCode(codeInput);
+            setIsSyncActive(true);
+            setModalConfig({ isOpen: false });
+          },
+          onCancel: () => setModalConfig({ isOpen: false })
+        });
+      };
+
+      const stopSync = () => {
+        setIsSyncActive(false);
+        setActiveSlotCode('');
+        setSyncStatus('idle');
+        setSyncErrorMessage('');
+      };
+
+      const handleAddSubject = () => {
+        const newId = generateId();
+        const color = COLORS[subjects.length % COLORS.length];
+        const newNum = (subjects.length + 10).toString().padStart(3, '0');
+        const newSubjNo = (subjects.length + 10).toString();
+        setSubjects([...subjects, { id: newId, name: `被験者${String.fromCharCode(65 + subjects.length)}`, subjectId: `FANS${newNum}`, subjectNo: newSubjNo, color }]);
+        setSelectedSubjectId(newId);
+      };
+
+      const handleDeleteSubject = (id) => {
+        if (subjects.length <= 1) return alert("少なくとも1人の被験者が必要です。");
+        setSubjects(subjects.filter(s => s.id !== id));
+        setTasks(tasks.filter(t => t.subjectId !== id));
+      };
+
+      const handleUpdateSubject = (id, field, value) => {
+        setSubjects(subjects.map(s => s.id === id ? { ...s, [field]: value } : s));
+      };
+
+      const handleToggleTask = (id) => {
+        if (isEditMode) return;
+        setTasks(tasks.map(t => t.id === id ? { ...t, checked: !t.checked } : t));
+      };
+
+      const handleUpdateTask = (id, field, value) => {
+        setTasks(tasks.map(t => t.id === id ? { ...t, [field]: value } : t));
+      };
+
+      const openAddDayModal = (taskId) => {
+        setModalConfig({
+          isOpen: true,
+          title: '新しい 日/フェーズ の追加',
+          content: (
+            <div>
+              <label className="text-xs font-bold text-gray-500 mb-2 block">フェーズ名 (例: 5日目, 予備日等):</label>
+              <input 
+                type="text" 
+                id="new-day-name-field"
+                className="w-full border-2 border-gray-300 rounded-lg p-2.5 text-sm font-bold focus:border-blue-500 outline-none"
+                placeholder="新しい名称を入力"
+              />
+            </div>
+          ),
+          onConfirm: () => {
+            const trimmed = document.getElementById('new-day-name-field')?.value?.trim();
+            if (trimmed) {
+              if (!availableDays.includes(trimmed)) {
+                setAvailableDays([...availableDays, trimmed]);
+              }
+              if (taskId) {
+                handleUpdateTask(taskId, 'day', trimmed);
+              }
+              setSelectedDay(trimmed);
+            }
+            setModalConfig({ isOpen: false });
+          },
+          onCancel: () => setModalConfig({ isOpen: false })
+        });
+      };
+
+      const handleDayChange = (taskId, value) => {
+        if (value === '__ADD_NEW__') {
+          openAddDayModal(taskId);
+        } else {
+          handleUpdateTask(taskId, 'day', value);
+        }
+      };
+
+      const handleAddTask = (subjectId) => {
+        setTasks([...tasks, { 
+          id: generateId(), 
+          subjectId, 
+          day: selectedDay || availableDays[0] || '1日目', 
+          timeStart: '08:00', 
+          timeEnd: '09:00', 
+          task: '', 
+          checked: false 
+        }]);
+      };
+
+      const handleDuplicateTask = (task) => {
+        const newTask = { ...task, id: generateId() };
+        const index = tasks.findIndex(t => t.id === task.id);
+        const newTasks = [...tasks];
+        newTasks.splice(index + 1, 0, newTask);
+        setTasks(newTasks);
+      };
+
+      const handleDeleteTask = (id) => {
+        setTasks(tasks.filter(t => t.id !== id));
+      };
+
+      const render5MinTimelineSchedule = (targetSubjectIds) => {
+        const activeSubjs = subjects.filter(s => targetSubjectIds.includes(s.id));
+        const dayTasks = tasks.filter(t => t.day === selectedDay && targetSubjectIds.includes(t.subjectId));
+
+        let minMin = 8 * 60;
+        let maxMin = 20 * 60;
+
+        dayTasks.forEach(t => {
+          const start = timeToMinutes(t.timeStart);
+          const end = timeToMinutes(t.timeEnd);
+          if (start >= 0) minMin = Math.min(minMin, Math.floor(start / 60) * 60);
+          if (end >= 0) maxMin = Math.max(maxMin, Math.ceil(end / 60) * 60);
+        });
+        
+        minMin = Math.max(0, minMin - 30);
+        maxMin = Math.min(24 * 60 - 5, maxMin + 60);
+
+        const slots = [];
+        for (let m = minMin; m <= maxMin; m += 5) {
+          const hh = Math.floor(m / 60).toString().padStart(2, '0');
+          const mm = (m % 60).toString().padStart(2, '0');
+          slots.push({ timeStr: `${hh}:${mm}`, minutes: m, isHourStart: m % 60 === 0 });
+        }
+
+        const unassignedTasks = dayTasks.filter(t => timeToMinutes(t.timeStart) < 0);
+
+        const onDragStart = (e, taskId) => {
+          e.dataTransfer.setData('text/plain', taskId);
+          e.dataTransfer.effectAllowed = 'move';
+        };
+
+        const onDragOver = (e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+        };
+
+        const onDrop = (e, targetSubjectId) => {
+          e.preventDefault();
+          const taskId = e.dataTransfer.getData('text/plain');
+          if (!taskId) return;
+
+          const container = e.currentTarget;
+          const rect = container.getBoundingClientRect();
+          const y = e.clientY - rect.top;
+
+          const minutesFromTop = (y / 24) * 5;
+          let newStartMin = Math.floor(minutesFromTop / 5) * 5 + minMin;
+          
+          if (newStartMin < 0) newStartMin = 0;
+          if (newStartMin > 24 * 60 - 5) newStartMin = 24 * 60 - 5;
+
+          const task = tasks.find(t => t.id === taskId);
+          if (!task) return;
+
+          const oldStartMin = timeToMinutes(task.timeStart);
+          const oldEndMin = timeToMinutes(task.timeEnd);
+          const durationMin = oldEndMin > oldStartMin ? oldEndMin - oldStartMin : 30;
+
+          let newEndMin = newStartMin + durationMin;
+          if (newEndMin > 24 * 60) newEndMin = 24 * 60;
+
+          const formatTime = (mins) => {
+            const h = Math.floor(mins / 60).toString().padStart(2, '0');
+            const m = (mins % 60).toString().padStart(2, '0');
+            return `${h}:${m}`;
+          };
+
+          setTasks(prevTasks => prevTasks.map(t => {
+            if (t.id === taskId) {
+              return {
+                ...t,
+                subjectId: targetSubjectId,
+                timeStart: formatTime(newStartMin),
+                timeEnd: formatTime(newEndMin)
+              };
+            }
+            return t;
+          }));
+        };
+
+        return (
+          <div className="flex flex-col h-full overflow-hidden bg-white">
+            {unassignedTasks.length > 0 && (
+              <div className="bg-amber-50 border-b border-amber-200 p-3 flex-shrink-0">
+                <p className="text-xs font-bold text-amber-800 mb-2">時刻指定なし / 前準備タスク:</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {unassignedTasks.map(t => {
+                    const subj = subjects.find(s => s.id === t.subjectId);
+                    return (
+                      <TaskItem 
+                        key={t.id} 
+                        task={t} 
+                        subject={subj} 
+                        viewType="checklist" 
+                        onToggle={handleToggleTask} 
+                        showSubjectLabel={targetSubjectIds.length > 1}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="flex-1 overflow-y-auto relative no-scrollbar">
+              <div className="flex min-w-full">
+                <div className="w-20 md:w-24 flex-shrink-0 bg-gray-50 border-r border-gray-300 sticky left-0 z-20 select-none">
+                  <div className="h-10 border-b border-gray-300 bg-gray-100 sticky top-0 z-30 flex items-center justify-center font-bold text-xs text-gray-500">
+                    時刻
+                  </div>
+                  {slots.map(slot => (
+                    <div 
+                      key={slot.timeStr} 
+                      className={`time-slot-row text-right pr-2 text-xs font-mono flex items-center justify-end ${
+                        slot.isHourStart 
+                          ? 'time-slot-hour-start font-black text-gray-900 bg-gray-200/50' 
+                          : 'border-t border-gray-100 text-gray-500'
+                      }`}
+                    >
+                      {slot.timeStr}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex-1 flex overflow-x-auto">
+                  {activeSubjs.map(subj => {
+                    const subjTasks = dayTasks.filter(t => t.subjectId === subj.id);
+
+                    return (
+                      <div key={subj.id} className="flex-1 min-w-[280px] border-r border-gray-200 bg-white relative">
+                        <div className={`h-10 sticky top-0 z-10 bg-${subj.color}-100 border-b border-${subj.color}-200 px-3 flex items-center justify-center font-bold text-xs text-${subj.color}-900 shadow-sm`}>
+                          <span className={`w-2.5 h-2.5 rounded-full bg-${subj.color}-500 mr-2`}></span>
+                          <span>{subj.name} ({subj.subjectId})</span>
+                        </div>
+
+                        <div 
+                          className="relative"
+                          onDragOver={onDragOver}
+                          onDrop={(e) => onDrop(e, subj.id)}
+                        >
+                          {slots.map(slot => (
+                            <div 
+                              key={slot.timeStr} 
+                              className={`time-slot-row ${
+                                slot.isHourStart ? 'time-slot-hour-start bg-gray-50/50' : 'border-t border-gray-100'
+                              }`}
+                            />
+                          ))}
+
+                          <div className="absolute inset-0 p-1 pointer-events-none">
+                            {subjTasks.map(t => {
+                              const startMin = timeToMinutes(t.timeStart);
+                              if (startMin < 0) return null;
+
+                              const endMin = timeToMinutes(t.timeEnd);
+                              const durationMin = (endMin > startMin) ? (endMin - startMin) : 30;
+
+                              const topPx = ((startMin - minMin) / 5) * 24;
+                              const heightPx = Math.max((durationMin / 5) * 24 - 4, 32);
+
+                              const parsedText = processPlaceholders(t.task, subj);
+
+                              return (
+                                <div
+                                  key={t.id}
+                                  draggable={true}
+                                  onDragStart={(e) => onDragStart(e, t.id)}
+                                  onClick={() => handleToggleTask(t.id)}
+                                  style={{ top: `${topPx + 2}px`, height: `${heightPx}px` }}
+                                  className={`absolute left-1 right-1 rounded-lg border-2 p-2 shadow-sm pointer-events-auto cursor-pointer transition-colors duration-150 flex items-start justify-between overflow-hidden ${
+                                    t.checked 
+                                      ? 'completed-task border-gray-300' 
+                                      : `active-task bg-white border-${subj.color}-300 hover:border-${subj.color}-500 hover:shadow-md cursor-grab active:cursor-grabbing`
+                                  }`}
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="text-[10px] font-mono font-bold text-gray-500 mb-0.5">
+                                      {t.timeStart}{t.timeEnd && t.timeEnd !== '-' ? ` - ${t.timeEnd}` : ''}
+                                    </div>
+                                    <div className={`text-xs leading-snug font-semibold truncate ${t.checked ? 'text-gray-400' : 'text-gray-800'}`}>
+                                      {parsedText}
+                                    </div>
+                                  </div>
+                                  <div className="flex-shrink-0 ml-1">
+                                    <div className={`w-4 h-4 rounded-full flex items-center justify-center border ${
+                                      t.checked ? 'bg-gray-400 border-gray-400 text-white' : `border-${subj.color}-400`
+                                    }`}>
+                                      {t.checked && <i className="fa-solid fa-check text-[8px]"></i>}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const renderChecklistView = (targetSubjectIds) => {
+        const filteredTasks = tasks.filter(t => t.day === selectedDay && targetSubjectIds.includes(t.subjectId))
+                                   .sort((a, b) => timeToMinutes(a.timeStart) - timeToMinutes(b.timeStart));
+
+        return (
+          <div className="h-full overflow-y-auto p-5 bg-gray-50 no-scrollbar">
+            <div className="max-w-3xl mx-auto">
+              <div className="flex items-center justify-between py-2 mb-4 border-b-2 border-gray-300">
+                <h3 className="text-base font-bold text-gray-800 flex items-center">
+                  <span className="w-3 h-3 rounded-full bg-emerald-500 mr-2"></span>
+                  {selectedDay} のチェックリスト
+                </h3>
+                <span className="text-xs font-mono text-gray-400">{filteredTasks.length}件</span>
+              </div>
+
+              <div className="space-y-2">
+                {filteredTasks.map(task => {
+                  const subject = subjects.find(s => s.id === task.subjectId);
+                  return (
+                    <TaskItem 
+                      key={task.id} 
+                      task={task} 
+                      subject={subject} 
+                      viewType="checklist" 
+                      onToggle={handleToggleTask}
+                      showSubjectLabel={targetSubjectIds.length > 1}
+                    />
+                  );
+                })}
+                {filteredTasks.length === 0 && (
+                  <div className="text-center text-gray-400 py-16 text-sm">この日のタスクはありません</div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <div className="flex flex-col h-screen bg-gray-100 relative">
+          {/* ファイルアップロード用の隠しinput */}
+          <input 
+            type="file" 
+            accept=".json" 
+            style={{ display: 'none' }} 
+            ref={fileInputRef} 
+            onChange={handleFileChange} 
+          />
+
+          {toastMessage && (
+            <div className="absolute top-16 left-1/2 transform -translate-x-1/2 z-50 bg-emerald-600 text-white px-4 py-2 rounded-full shadow-lg text-xs font-bold flex items-center space-x-2 animate-bounce">
+              <span>{toastMessage}</span>
+            </div>
+          )}
+
+          <div className="bg-white shadow-sm z-20 px-5 py-3 flex flex-wrap items-center justify-between border-b border-gray-200">
+            <div className="flex items-center space-x-4">
+              <h1 className="text-lg font-black text-gray-800 flex items-center tracking-tight">
+                <i className="fa-solid fa-list-check text-blue-600 mr-2 text-xl"></i>
+                実験進行マネージャー
+              </h1>
+              
+              {!isEditMode && (
+                <div className="flex bg-gray-100 p-1 rounded-xl">
+                  <button 
+                    onClick={() => setViewType('schedule')} 
+                    className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      viewType === 'schedule' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    <i className="fa-regular fa-calendar-days mr-1.5"></i>スケジュール表
+                  </button>
+                  <button 
+                    onClick={() => setViewType('checklist')} 
+                    className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                      viewType === 'checklist' ? 'bg-white shadow-sm text-emerald-600' : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    <i className="fa-solid fa-square-check mr-1.5"></i>チェックリスト
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center space-x-3">
+              <div className="flex items-center bg-gray-50 border border-gray-200 rounded-lg p-1 space-x-2">
+                <button
+                  onClick={openSyncModal}
+                  className={`px-3 py-1 rounded-md text-xs font-bold flex items-center transition ${
+                    syncStatus === 'unconfigured' || syncStatus === 'error'
+                      ? 'bg-red-50 text-red-700 border border-red-200 hover:bg-red-100'
+                      : isSyncActive 
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100' 
+                        : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-100'
+                  }`}
+                >
+                  <i className={`fa-solid ${
+                    syncStatus === 'unconfigured' || syncStatus === 'error' 
+                      ? 'fa-triangle-exclamation text-red-500' 
+                      : isSyncActive 
+                        ? 'fa-rotate text-emerald-500 animate-spin' 
+                        : 'fa-rotate text-gray-400'
+                  } mr-1.5`}></i>
+                  {syncStatus === 'unconfigured' 
+                    ? '⚠️ Firebase未設定' 
+                    : syncStatus === 'error'
+                      ? '⚠️ 通信エラー'
+                      : isSyncActive 
+                        ? `同期中 #${activeSlotCode}` 
+                        : '匿名同期'}
+                </button>
+                {isSyncActive && (
+                  <button 
+                    onClick={stopSync}
+                    title="同期解除" 
+                    className="text-gray-400 hover:text-red-500 text-xs px-1.5 py-0.5 rounded"
+                  >
+                    <i className="fa-solid fa-xmark"></i>
+                  </button>
+                )}
+              </div>
+
+              {!isEditMode && (
+                <div className="flex items-center space-x-2 border-l border-gray-200 pl-3">
+                  <div className="flex bg-gray-100 p-1 rounded-xl mr-2">
+                    <button 
+                      onClick={() => setDisplayMode('individual')} 
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                        displayMode === 'individual' ? 'bg-white shadow text-gray-800 font-bold' : 'text-gray-500'
+                      }`} 
+                      title="選択した被験者のみ"
+                    >
+                      <i className="fa-solid fa-user mr-1"></i>個別
+                    </button>
+                    <button 
+                      onClick={() => setDisplayMode('columns')} 
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+                        displayMode === 'columns' ? 'bg-white shadow text-gray-800 font-bold' : 'text-gray-500'
+                      }`} 
+                      title="全員を並べて表示"
+                    >
+                      <i className="fa-solid fa-table-columns mr-1"></i>並べて表示
+                    </button>
+                  </div>
+                  
+                  {/* 追加: テンプレート読込・保存・Excel出力ボタン */}
+                  <div className="flex items-center space-x-1">
+                    <button onClick={handleImportTemplateClick} className="px-3 py-1.5 bg-gray-50 text-gray-700 rounded-lg border border-gray-300 hover:bg-gray-100 text-xs font-bold transition">
+                      <i className="fa-solid fa-file-import mr-1.5"></i>読込
+                    </button>
+                    <button onClick={handleExportTemplateClick} className="px-3 py-1.5 bg-gray-50 text-gray-700 rounded-lg border border-gray-300 hover:bg-gray-100 text-xs font-bold transition">
+                      <i className="fa-solid fa-file-export mr-1.5"></i>保存
+                    </button>
+                    <button onClick={() => exportToExcel(tasks, subjects)} className="px-3 py-1.5 bg-emerald-50 text-emerald-700 rounded-lg border border-emerald-200 hover:bg-emerald-100 text-xs font-bold transition">
+                      <i className="fa-solid fa-file-excel mr-1.5"></i>Excel
+                    </button>
+                  </div>
+                </div>
+              )}
+              
+              <button 
+                onClick={() => setIsEditMode(!isEditMode)} 
+                className={`ml-2 px-4 py-1.5 rounded-lg border transition text-xs font-bold shadow-sm ${
+                  isEditMode ? 'bg-blue-600 text-white border-blue-700 hover:bg-blue-700' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                <i className={`fa-solid ${isEditMode ? 'fa-check' : 'fa-pen-to-square'} mr-1.5`}></i>
+                {isEditMode ? '完了' : '編集モード'}
+              </button>
+            </div>
+          </div>
+
+          {!isEditMode && (
+            <div className="bg-gray-50 px-5 py-2 border-b border-gray-200 flex flex-wrap items-center justify-between gap-3 shadow-inner">
+              <div className="flex items-center space-x-1 overflow-x-auto no-scrollbar">
+                <span className="text-xs font-bold text-gray-400 mr-2 whitespace-nowrap">フェーズ:</span>
+                {availableDays.map(day => (
+                  <button
+                    key={day}
+                    onClick={() => setSelectedDay(day)}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${
+                      selectedDay === day 
+                        ? 'bg-blue-600 text-white shadow' 
+                        : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-100'
+                    }`}
+                  >
+                    {day}
+                  </button>
+                ))}
+              </div>
+
+              {displayMode === 'individual' && (
+                <div className="flex items-center space-x-2 overflow-x-auto no-scrollbar">
+                  <span className="text-xs font-bold text-gray-400 mr-1 whitespace-nowrap">被験者:</span>
+                  {subjects.map(subj => (
+                    <button 
+                      key={subj.id}
+                      onClick={() => setSelectedSubjectId(subj.id)}
+                      className={`flex items-center px-3 py-1 rounded-full text-xs font-bold border transition-all whitespace-nowrap ${
+                        selectedSubjectId === subj.id 
+                          ? `bg-${subj.color}-100 border-${subj.color}-300 text-${subj.color}-900 shadow-sm ring-2 ring-${subj.color}-400/30` 
+                          : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-100'
+                      }`}
+                    >
+                      <span className={`w-2 h-2 rounded-full bg-${subj.color}-500 mr-1.5`}></span>
+                      {subj.name || '未設定'} ({subj.subjectId})
+                    </button>
+                  ))}
+                  <button onClick={handleAddSubject} className="px-2.5 py-1 rounded-full text-xs bg-white border border-dashed border-gray-300 text-gray-500 hover:bg-gray-100 font-bold whitespace-nowrap">
+                    <i className="fa-solid fa-plus mr-1"></i>追加
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex-1 overflow-hidden relative bg-white">
+            {isEditMode ? (
+              <div className="h-full overflow-y-auto p-6 bg-gray-100">
+                <div className="max-w-5xl mx-auto bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+                  <div className="bg-gray-50 px-6 py-4 border-b border-gray-200 flex flex-wrap justify-between items-center gap-4">
+                    {subjects.find(s=>s.id===selectedSubjectId) && (() => {
+                      const s = subjects.find(s=>s.id===selectedSubjectId);
+                      return (
+                        <div className="flex items-center space-x-4">
+                          <div>
+                            <label className="text-[10px] font-bold text-gray-400 uppercase block">被験者名</label>
+                            <input type="text" value={s.name} onChange={e => handleUpdateSubject(s.id, 'name', e.target.value)} className="border border-gray-300 rounded-lg px-2.5 py-1 text-sm font-bold w-32 focus:ring-2 focus:ring-blue-500 outline-none" />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-gray-400 uppercase block">被験者ID</label>
+                            <input type="text" value={s.subjectId} onChange={e => handleUpdateSubject(s.id, 'subjectId', e.target.value.toUpperCase())} className="border border-gray-300 rounded-lg px-2.5 py-1 text-sm font-mono w-28 focus:ring-2 focus:ring-blue-500 outline-none" />
+                          </div>
+                          <div>
+                            <label className="text-[10px] font-bold text-gray-400 uppercase block">ｻﾌﾞｼﾞｪｸﾄNo.</label>
+                            <input type="text" value={s.subjectNo || ''} onChange={e => handleUpdateSubject(s.id, 'subjectNo', e.target.value)} className="border border-gray-300 rounded-lg px-2.5 py-1 text-sm font-mono w-20 focus:ring-2 focus:ring-blue-500 outline-none" />
+                          </div>
+                          <button onClick={() => handleDeleteSubject(s.id)} className="mt-3 text-red-500 text-xs font-bold hover:underline">
+                            <i className="fa-solid fa-trash mr-1"></i>削除
+                          </button>
+                        </div>
+                      );
+                    })()}
+                  </div>
+
+                  <div className="p-6">
+                    <div className="grid grid-cols-12 gap-2 font-bold text-gray-400 text-[11px] px-2 mb-3">
+                      <div className="col-span-3">日 / フェーズ</div>
+                      <div className="col-span-2">開始時刻</div>
+                      <div className="col-span-2">終了時刻</div>
+                      <div className="col-span-3">タスク内容</div>
+                      <div className="col-span-2 text-center">操作</div>
+                    </div>
+                    
+                    <div className="space-y-2">
+                      {tasks.filter(t => t.subjectId === selectedSubjectId).map((task) => (
+                        <div key={task.id} className="grid grid-cols-12 gap-2 items-center bg-gray-50 p-2 rounded-xl border border-gray-200 hover:border-gray-300 transition">
+                          <div className="col-span-3">
+                            <select 
+                              value={task.day} 
+                              onChange={e => handleDayChange(task.id, e.target.value)}
+                              className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs font-bold bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+                            >
+                              {availableDays.map(d => (
+                                <option key={d} value={d}>{d}</option>
+                              ))}
+                              <option value="__ADD_NEW__" className="text-blue-600 font-bold">+ 新しい項目を追加...</option>
+                            </select>
+                          </div>
+
+                          <div className="col-span-2">
+                            <select 
+                              value={task.timeStart} 
+                              onChange={e => handleUpdateTask(task.id, 'timeStart', e.target.value)} 
+                              className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs font-mono bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+                            >
+                              {TIME_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          </div>
+
+                          <div className="col-span-2">
+                            <select 
+                              value={task.timeEnd} 
+                              onChange={e => handleUpdateTask(task.id, 'timeEnd', e.target.value)} 
+                              className="w-full border border-gray-300 rounded-lg px-2 py-1.5 text-xs font-mono bg-white focus:ring-2 focus:ring-blue-500 outline-none"
+                            >
+                              {TIME_OPTIONS.map(t => <option key={t} value={t}>{t}</option>)}
+                            </select>
+                          </div>
+
+                          <div className="col-span-3">
+                            <input 
+                              type="text" 
+                              value={task.task} 
+                              onChange={e => handleUpdateTask(task.id, 'task', e.target.value)} 
+                              className="w-full border border-gray-300 rounded-lg px-2.5 py-1.5 text-xs bg-white focus:ring-2 focus:ring-blue-500 outline-none" 
+                              placeholder="タスク内容" 
+                            />
+                          </div>
+
+                          <div className="col-span-2 flex justify-center space-x-1">
+                            <button onClick={() => handleDuplicateTask(task)} title="複製" className="p-1.5 text-blue-500 hover:text-blue-700 rounded-lg hover:bg-blue-100 transition">
+                              <i className="fa-regular fa-copy text-sm"></i>
+                            </button>
+                            <button onClick={() => handleDeleteTask(task.id)} title="削除" className="p-1.5 text-red-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition">
+                              <i className="fa-solid fa-trash text-sm"></i>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    
+                    <button 
+                      onClick={() => handleAddTask(selectedSubjectId)} 
+                      className="mt-5 w-full py-3 border-2 border-dashed border-gray-300 text-gray-500 rounded-xl hover:bg-gray-50 hover:text-gray-700 transition font-bold text-xs flex items-center justify-center"
+                    >
+                      <i className="fa-solid fa-plus mr-2"></i> 新しいタスク枠を追加
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="h-full">
+                {viewType === 'schedule' ? (
+                  render5MinTimelineSchedule(displayMode === 'individual' ? [selectedSubjectId] : subjects.map(s => s.id))
+                ) : (
+                  renderChecklistView(displayMode === 'individual' ? [selectedSubjectId] : subjects.map(s => s.id))
+                )}
+              </div>
+            )}
+          </div>
+          
+          <Modal 
+            isOpen={modalConfig.isOpen}
+            title={modalConfig.title}
+            message={modalConfig.message}
+            onConfirm={modalConfig.onConfirm}
+            onCancel={modalConfig.onCancel}
+          >
+            {modalConfig.content}
+          </Modal>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
