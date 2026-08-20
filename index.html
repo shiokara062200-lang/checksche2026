@@ -18,7 +18,15 @@
     import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'schedule-sync-app';
-    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+    const firebaseConfig = {
+  apiKey: "AIzaSyC3ItczFJKx8C-qNO8t0D4ycZNNDvGifmc",
+  authDomain: "checklist-schedule.firebaseapp.com",
+  projectId: "checklist-schedule",
+  storageBucket: "checklist-schedule.firebasestorage.app",
+  messagingSenderId: "27095356750",
+  appId: "1:27095356750:web:647eff472b237d19903a1f",
+  measurementId: "G-5C4K59L9E1"
+};
 
     let db = null;
     let auth = null;
