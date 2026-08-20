@@ -198,10 +198,12 @@
       const idNum = idMatch ? parseInt(idMatch[0], 10).toString() : "0";
       
       processed = processed.replace(/{{SUBJECT_ID}}/g, subjectId);
-      processed = processed.replace(/{{被験者ID}}/g, subjectId);
+【ナビゲーションパス】
+被験者識別子
+      processed = processed.replace(/\[被験者ID\]/g, subjectId);
       processed = processed.replace(/\[サブジェクト\]/g, subjectNo);
-      processed = processed.replace(/{{SESSION:(\d+):(\d+)}}/g, (match, day, count) => `${idNum}${day}${count}`);
-      processed = processed.replace(/\[セッション:(\d+):(\d+)\]/g, (match, day, count) => `${idNum}${day}${count}`);
+      processed = processed.replace(/{{:(\d+):(\d+)}}/g, (match, day, count) => `${idNum}${day}${count}`);
+      processed = processed.replace(/\[:(\d+):(\d+)\]/g, (match, day, count) => `${idNum}${day}${count}`);
       
       return processed;
     };
