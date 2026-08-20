@@ -18,9 +18,6 @@
     import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'schedule-sync-app';
-
-    
-    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
     const firebaseConfig = {
   apiKey: "AIzaSyC3ItczFJKx8C-qNO8t0D4ycZNNDvGifmc",
   authDomain: "checklist-schedule.firebaseapp.com",
@@ -198,8 +195,8 @@
       const idNum = idMatch ? parseInt(idMatch[0], 10).toString() : "0";
       
       processed = processed.replace(/{{SUBJECT_ID}}/g, subjectId);
-【ナビゲーションパス】
-被験者識別子
+//【ナビゲーションパス】
+//被験者識別子
       processed = processed.replace(/\[被験者ID\]/g, subjectId);
       processed = processed.replace(/\[サブジェクト\]/g, subjectNo);
       processed = processed.replace(/{{:(\d+):(\d+)}}/g, (match, day, count) => `${idNum}${day}${count}`);
