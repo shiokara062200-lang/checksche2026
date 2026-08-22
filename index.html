@@ -203,7 +203,7 @@
       
       // [ ] の全角・半角両方に対応
       processed = processed.replace(/{{SUBJECT_ID}}/g, subjectId);
-      processed = processed.replace(/[\[［]被験者ID[\]］]/g, subjectId);
+      processed = processed.replace(/[\[［]被[験検]者ID[\]］]/g, subjectId);
       processed = processed.replace(/[\[［]サブジェクト[\]］]/g, subjectNo);
       
       // 全角数字を半角に変換する内部関数
