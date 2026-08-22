@@ -201,13 +201,23 @@
       const idMatch = subjectId.match(/\d+/);
       const idNum = idMatch ? parseInt(idMatch[0], 10).toString() : "0";
       
+      // [ ] の全角・半角両方に対応
       processed = processed.replace(/{{SUBJECT_ID}}/g, subjectId);
-      //【ナビゲーションパス】
-      //被験者識別子
-      processed = processed.replace(/\[被験者ID\]/g, subjectId);
-      processed = processed.replace(/\[サブジェクト\]/g, subjectNo);
-      processed = processed.replace(/{{:(\d+):(\d+)}}/g, (match, day, count) => `${idNum}${day}${count}`);
-      processed = processed.replace(/\[:(\d+):(\d+)\]/g, (match, day, count) => `${idNum}${day}${count}`);
+      processed = processed.replace(/[\[［]被験者ID[\]］]/g, subjectId);
+      processed = processed.replace(/[\[［]サブジェクト[\]］]/g, subjectNo);
+      
+      // 全角数字を半角に変換する内部関数
+      const toHalfWidthNum = (str) => {
+        return str.replace(/[０-９]/g, (s) => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
+      };
+
+      // コロン( : )やカッコ( [ ] )、数字の全角・半角混在に対応
+      const convertMatch = (match, day, count) => {
+        return `${idNum}${toHalfWidthNum(day)}${toHalfWidthNum(count)}`;
+      };
+
+      processed = processed.replace(/{{[:：]([0-9０-９]+)[:：]([0-9０-９]+)}}/g, convertMatch);
+      processed = processed.replace(/[\[［][:：]([0-9０-９]+)[:：]([0-9０-９]+)[\]］]/g, convertMatch);
       
       return processed;
     };
